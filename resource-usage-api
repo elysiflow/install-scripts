@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -xe  # -x: mostra comandi eseguiti, -e: interrompe allo 1° errore
+
+###############################################################################
+# Variabili di configurazione (v4.0)
+###############################################################################
+SERVICE_NAME="system_monitor"
+INSTALL_DIR="/opt/${SERVICE_NAME}"        # Directory di installazione
+SYSTEMD_UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+PYTHON_CMD="python3"
+SERVICE_PORT="5555"                       # Porta sulla quale gira la web API
+
+echo "(v4.0) Avviato script di installazione idempotente"
+
+###############################################################################
+# 1. Verifica e installa python3, python3-flask e python3-psutil (v4.0)
+###############################################################################
+echo "(v4.0) Verifica se python3 è installato..."
+if ! command -v "$PYTHON_CMD" &> /dev/null; then
+    echo "(v4.0) Python3 non trovato. Installazione..."
+    apt-get update -y
+    apt-get install -y python3
+else
+    echo "(v4.0) Python3 risulta già installato."
+fi
+
+echo "(v4.0) Verifica se python3-flask e python3-psutil sono installati..."
+FLASK_INSTALLED=$(dpkg -l | grep -cw python3-flask || true)
+PSUTIL_INSTALLED=$(dpkg -l | grep -cw python3-psutil || true)
+
+if [[ "$FLASK_INSTALLED" -eq 0 || "$PSUTIL_INSTALLED" -eq 0 ]]; then
+    echo "(v4.0) Installo i pacchetti python3-flask e python3-psutil..."
+    apt-get update -y
+    apt-get install -y python3-flask python3-psutil
+else
+    echo "(v4.0) python3-flask e python3-psutil sono già presenti."
+fi
+
+###############################################################################
+# 2. Crea/aggiorna il file system_monitor.py (v4.0)
+###############################################################################
+echo "(v4.0) Creazione della cartella di installazione: $INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
+
+SYSTEM_MONITOR_FILE="${INSTALL_DIR}/system_monitor.py"
+
+echo "(v4.0) Scrittura del file Python con porta=$SERVICE_PORT..."
+
+cat > "$SYSTEM_MONITOR_FILE" << EOF
+#!/usr/bin/env python3
+from flask import Flask, jsonify
+import psutil
+
+app = Flask(__name__)
+
+@app.route('/api/system_stats', methods=['GET'])
+def system_stats():
+    disk_usage = psutil.disk_usage('/')
+    memory = psutil.virtual_memory()
+    cpu_percent = psutil.cpu_percent(interval=1)
+
+    stats = {
+        'disk': {
+            'total': disk_usage.total,
+            'used': disk_usage.used,
+            'free': disk_usage.free,
+            'percent': disk_usage.percent
+        },
+        'memory': {
+            'total': memory.total,
+            'available': memory.available,
+            'used': memory.used,
+            'percent': memory.percent
+        },
+        'cpu': {
+            'percent': cpu_percent
+        }
+    }
+    return jsonify(stats)
+
+if __name__ == '__main__':
+    # Ascolta su tutte le interfacce, porta personalizzata
+    app.run(host='0.0.0.0', port=$SERVICE_PORT)
+EOF
+
+chmod 755 "$SYSTEM_MONITOR_FILE"
+
+###############################################################################
+# 3. Crea/aggiorna il file di servizio systemd (v4.0)
+###############################################################################
+echo "(v4.0) Creazione/aggiornamento file di servizio systemd: $SYSTEMD_UNIT_FILE"
+
+cat > "$SYSTEMD_UNIT_FILE" << EOF
+[Unit]
+Description=System Monitor API (v4.0)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$PYTHON_CMD $SYSTEM_MONITOR_FILE
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "(v4.0) Ricarico la configurazione systemd..."
+systemctl daemon-reload
+
+echo "(v4.0) Abilito il servizio $SERVICE_NAME all'avvio..."
+systemctl enable "$SERVICE_NAME"
+
+echo "(v4.0) Riavvio il servizio $SERVICE_NAME..."
+systemctl restart "$SERVICE_NAME"
+
+echo "(v4.0) Verifica stato del servizio..."
+systemctl status "$SERVICE_NAME" --no-pager || true
+
+echo "(v4.0) Fine script di installazione."
