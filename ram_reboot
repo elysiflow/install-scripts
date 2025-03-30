@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -xe  # -x: mostra comandi eseguiti, -e: interrompe allo 1° errore
+
+###############################################################################
+# Variabili di configurazione (v1.0)
+###############################################################################
+SERVICE_NAME="ram_reboot"
+INSTALL_DIR="/opt/${SERVICE_NAME}"             # Directory di installazione
+SYSTEMD_UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+PYTHON_CMD="python3"
+
+echo "(v1.0) Avviato script di installazione idempotente per il servizio RAM Reboot"
+
+###############################################################################
+# 1. Verifica e installa python3 e psutil
+###############################################################################
+echo "(v1.0) Verifica se python3 è installato..."
+if ! command -v "$PYTHON_CMD" &> /dev/null; then
+    echo "(v1.0) Python3 non trovato. Installazione..."
+    apt-get update -y
+    apt-get install -y python3
+else
+    echo "(v1.0) Python3 risulta già installato."
+fi
+
+echo "(v1.0) Verifica se python3-psutil è installato..."
+PSUTIL_INSTALLED=$(dpkg -l | grep -cw python3-psutil || true)
+if [[ "$PSUTIL_INSTALLED" -eq 0 ]]; then
+    echo "(v1.0) Installo il pacchetto python3-psutil..."
+    apt-get update -y
+    apt-get install -y python3-psutil
+else
+    echo "(v1.0) python3-psutil è già presente."
+fi
+
+###############################################################################
+# 2. Crea/aggiorna il file ram_reboot.py
+###############################################################################
+echo "(v1.0) Creazione della cartella di installazione: $INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
+
+RAM_REBOOT_FILE="${INSTALL_DIR}/ram_reboot.py"
+
+echo "(v1.0) Scrittura del file Python che controlla la RAM al 99%..."
+cat > "$RAM_REBOOT_FILE" << 'EOF'
+#!/usr/bin/env python3
+import time
+import psutil
+import os
+
+# Esempio semplice:
+# - Ogni 10 secondi controlla l'utilizzo RAM
+# - Se la percentuale supera il 99%, effettua il reboot.
+
+CHECK_INTERVAL_SECONDS = 10
+THRESHOLD_PERCENT = 99
+
+if __name__ == '__main__':
+    while True:
+        mem = psutil.virtual_memory()
+        if mem.percent >= THRESHOLD_PERCENT:
+            # Effettua il reboot. 
+            # In un contesto reale potresti inserire logiche aggiuntive 
+            # (es. controllare più volte di fila, ecc.)
+            os.system('reboot')
+
+        time.sleep(CHECK_INTERVAL_SECONDS)
+EOF
+
+chmod 755 "$RAM_REBOOT_FILE"
+
+###############################################################################
+# 3. Crea/aggiorna il file di servizio systemd
+###############################################################################
+echo "(v1.0) Creazione/aggiornamento file di servizio systemd: $SYSTEMD_UNIT_FILE"
+
+cat > "$SYSTEMD_UNIT_FILE" << EOF
+[Unit]
+Description=RAM Reboot Service (v1.0)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$PYTHON_CMD $RAM_REBOOT_FILE
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "(v1.0) Ricarico la configurazione systemd..."
+systemctl daemon-reload
+
+echo "(v1.0) Abilito il servizio $SERVICE_NAME all'avvio..."
+systemctl enable "$SERVICE_NAME"
+
+echo "(v1.0) Avvio o riavvio il servizio $SERVICE_NAME..."
+systemctl restart "$SERVICE_NAME"
+
+echo "(v1.0) Verifica stato del servizio..."
+systemctl status "$SERVICE_NAME" --no-pager || true
+
+echo "(v1.0) Fine script di installazione."
