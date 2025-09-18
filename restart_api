@@ -51,14 +51,19 @@ def restart():
     if token != REQUIRED_TOKEN:
         abort(401)
 
-    # Programma il reboot tra 1 minuto, così la risposta HTTP esce pulita
+    # Reboot immediato: pianificato tra 2s in background
     try:
-        subprocess.check_call(["/sbin/shutdown", "-r", "+1", "Reboot via API"])
+        subprocess.Popen(
+            ["/bin/bash", "-lc", "(sleep 2; systemctl reboot) &"],
+            close_fds=True
+        )
     except FileNotFoundError:
-        # fallback su systemctl se shutdown non fosse presente nel path
-        subprocess.Popen(["/bin/bash", "-lc", "sleep 1; systemctl reboot"], close_fds=True)
+        subprocess.Popen(
+            ["/bin/bash", "-lc", "(sleep 2; /sbin/reboot) &"],
+            close_fds=True
+        )
 
-    return jsonify({"status": "scheduled", "action": "reboot", "eta": "~60s"}), 200
+    return jsonify({"status": "scheduled", "action": "reboot", "eta": "~2s"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("SERVICE_PORT", "5566"))
