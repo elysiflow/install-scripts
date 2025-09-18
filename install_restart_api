@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -xe  # mostra comandi ed esci al primo errore
+
+###############################################################################
+# Config
+###############################################################################
+SERVICE_NAME="system_restart_api"
+INSTALL_DIR="/opt/${SERVICE_NAME}"
+SYSTEMD_UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+ENV_FILE="/etc/system-restart-api.env"
+PYTHON_CMD="python3"
+SERVICE_PORT="5566"  # <--- cambia qui se vuoi un'altra porta
+
+echo "(restart-api) Avvio installazione idempotente"
+
+###############################################################################
+# 1) Pacchetti
+###############################################################################
+if ! command -v "$PYTHON_CMD" &>/dev/null; then
+  apt-get update -y
+  apt-get install -y python3
+fi
+
+# Solo Flask, niente psutil
+FLASK_INSTALLED=$(dpkg -l | grep -cw python3-flask || true)
+if [[ "$FLASK_INSTALLED" -eq 0 ]]; then
+  apt-get update -y
+  apt-get install -y python3-flask
+fi
+
+###############################################################################
+# 2) Cartella/app
+###############################################################################
+mkdir -p "$INSTALL_DIR"
+API_FILE="${INSTALL_DIR}/app.py"
+
+cat > "$API_FILE" << 'EOF'
+#!/usr/bin/env python3
+import os, subprocess
+from flask import Flask, request, jsonify, abort
+
+app = Flask(__name__)
+
+REQUIRED_TOKEN = os.environ.get("RESTART_TOKEN", "")
+if not REQUIRED_TOKEN:
+    raise RuntimeError("RESTART_TOKEN non impostato nell'ambiente")
+
+@app.route('/api/restart', methods=['POST'])
+def restart():
+    token = request.headers.get('X-Auth-Token', '')
+    if token != REQUIRED_TOKEN:
+        abort(401)
+
+    # Programma il reboot tra 1 minuto, così la risposta HTTP esce pulita
+    try:
+        subprocess.check_call(["/sbin/shutdown", "-r", "+1", "Reboot via API"])
+    except FileNotFoundError:
+        # fallback su systemctl se shutdown non fosse presente nel path
+        subprocess.Popen(["/bin/bash", "-lc", "sleep 1; systemctl reboot"], close_fds=True)
+
+    return jsonify({"status": "scheduled", "action": "reboot", "eta": "~60s"}), 200
+
+if __name__ == '__main__':
+    port = int(os.environ.get("SERVICE_PORT", "5566"))
+    # Ascolta su tutte le interfacce (metti un firewall se esponi pubblicamente)
+    app.run(host='0.0.0.0', port=port)
+EOF
+
+chmod 755 "$API_FILE"
+
+###############################################################################
+# 3) Token/env
+###############################################################################
+if [[ ! -f "$ENV_FILE" ]]; then
+  # genera un token casuale se non esiste
+  TOKEN_GEN=$(openssl rand -hex 32)
+  echo "RESTART_TOKEN=${TOKEN_GEN}" > "$ENV_FILE"
+  echo "SERVICE_PORT=${SERVICE_PORT}" >> "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  echo "(restart-api) Creato ${ENV_FILE} con token random."
+else
+  # assicurati che la porta sia coerente
+  if ! grep -q "^SERVICE_PORT=" "$ENV_FILE"; then
+    echo "SERVICE_PORT=${SERVICE_PORT}" >> "$ENV_FILE"
+  else
+    sed -i "s/^SERVICE_PORT=.*/SERVICE_PORT=${SERVICE_PORT}/" "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+fi
+
+###############################################################################
+# 4) systemd unit
+###############################################################################
+cat > "$SYSTEMD_UNIT_FILE" << EOF
+[Unit]
+Description=Minimal Restart API (only POST /api/restart)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=$PYTHON_CMD $API_FILE
+Restart=always
+RestartSec=2
+# Hardening (facoltativo, ma utile)
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
+systemctl status "$SERVICE_NAME" --no-pager || true
+
+echo "(restart-api) Installazione completata."
